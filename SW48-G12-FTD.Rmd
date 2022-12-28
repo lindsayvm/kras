@@ -1,0 +1,238 @@
+---
+title: "SW48-report"
+author: "Thomas W. Battaglia"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introuction
+(TODO)
+
+----
+
+## Load data
+```{r}
+library(GSVA)
+library(edgeR)
+library(DESeq2)
+library(limma)
+library(ggsci)
+library(ggpubr)
+library(ggthemes)
+library(tidyverse)
+```
+
+
+### Import HISAT2 counts
+```{r}
+# Import gene counts
+counts = read_tsv("genecounts.txt") %>% 
+  filter(!is.na(ensembl_gene_id)) %>% 
+  janitor::clean_names() %>% 
+  select(external_gene_id, x1_sw48_kraswt_1:x18_sw48_krasg12v_2_5_fu_1_u_m) %>% 
+  distinct(external_gene_id, .keep_all = T) %>% 
+  column_to_rownames("external_gene_id") 
+
+# Fix column names
+counts = counts %>% 
+  rename("KRAS_WT_rep1" = "x1_sw48_kraswt_1",
+         "KRAS_WT_rep2" = "x2_sw48_kraswt_2",
+         "KRAS_WT_FTD_rep1" = "x3_sw48_kraswt_1_ftd_1_u_m",
+         "KRAS_WT_FTD_rep2" = "x4_sw48_kraswt_2_ftd_1_u_m",
+         "KRAS_WT_FU_rep1" = "x7_sw48_kraswt_1_5_fu_1_u_m",
+         "KRAS_WT_FU_rep2" = "x8_sw48_kraswt_2_5_fu_1_u_m",
+         "KRAS_G12_rep1" = "x11_sw48_krasg12v_1",
+         "KRAS_G12_rep2" = "x12_sw48_krasg12v_2",
+         "KRAS_G12_FTD_rep1" = "x13_sw48_krasg12v_1_ftd_1_u_m",
+         "KRAS_G12_FTD_rep2" = "x14_sw48_krasg12v_2_ftd_1_u_m",
+         "KRAS_G12_FU_rep1" = "x17_sw48_krasg12v_1_5_fu_1_u_m",
+         "KRAS_G12_FU_rep2" = "x18_sw48_krasg12v_2_5_fu_1_u_m")
+head(counts)
+```
+
+### Create metadata
+```{r}
+# Make metadata
+metadata = data.frame(Sample = colnames(counts),
+                      Genotype = c(rep("WT", 6), rep("G12", 6)),
+                      Treatment = c("Untreated", "Untreated", "FTD", "FTD", "FU", "FU",
+                                    "Untreated", "Untreated", "FTD", "FTD", "FU", "FU")) %>% 
+  mutate(Group = paste(Genotype, Treatment, sep = "-")) %>% 
+  mutate(sample_id = Sample) %>% 
+  column_to_rownames("sample_id")
+head(metadata)
+```
+
+----
+
+## Compute hallmark ssGSEA
+
+
+### Limma-Voom normalize
+```{r}
+# Normalized the data with Limma Voom
+d0 <- DGEList(as.matrix(counts))
+keep.exprs <- filterByExpr(d0, group = metadata$Group)
+d <- d0[keep.exprs, keep.lib.sizes=FALSE]
+dim(d)
+d <- calcNormFactors(d, method = "TMM")
+mm <- model.matrix(~0 + Group, data = metadata)
+y <- voom(d, mm, plot = T)
+
+# Write table to disk
+y$E %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Symbol") %>% 
+  write_csv("counts-voom-normalized.csv")
+```
+
+
+### ssGSEA
+```{r}
+# Import hallmarks
+hallmark = GSEABase::getGmt("https://data.broadinstitute.org/gsea-msigdb/msigdb/release/7.5.1/h.all.v7.5.1.symbols.gmt")
+
+# Run ssGSEA analysis
+ssgsea.hallmark <- gsva(y$E, hallmark, verbose = T, parallel.sz = 12, method = "ssgsea")
+
+# Convert to dataframe
+ssgsea.hallmark.df = ssgsea.hallmark %>% 
+  as.data.frame() %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Sample") 
+
+# Write to disk
+ssgsea.hallmark.df %>% 
+  left_join(metadata) %>%
+  relocate(Sample, Genotype, Treatment, Group) %>% 
+  write_csv("hallmark-signatures-ssgsea.csv")
+
+# Convert to zscore and write to disk
+ssgsea.hallmark.df %>%
+  column_to_rownames("Sample") %>% 
+  scale() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata) %>%
+  relocate(Sample, Genotype, Treatment, Group) %>% 
+  write_csv("hallmark-signatures-ssgsea-zscore.csv")
+```
+
+### Plot results
+```{r}
+ssgsea.hallmark.df %>%
+  column_to_rownames("Sample") %>% 
+  scale() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata) %>%
+  relocate(Sample, Genotype, Treatment, Group) %>% 
+  ggplot(aes(x = Group, y = HALLMARK_DNA_REPAIR, fill = Group)) +
+    stat_boxplot(geom ='errorbar', width = 0.2) +
+  geom_boxplot() +
+  stat_compare_means(method = "t.test", 
+                     comparisons = list(c("WT-Control", "G12-Control"),
+                                        c("G12-FTD", "WT-FTD"),
+                                        c("G12-Control", "G12-FTD"))) +
+  theme_few(base_size = 10) +
+  scale_fill_jco() +
+  xlab("") +
+  ylab("ssGSEA DNA repair hallmark (zscore)")
+
+
+ssgsea.hallmark.df %>%
+  column_to_rownames("Sample") %>% 
+  scale() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Sample") %>% 
+  left_join(metadata) %>%
+  relocate(Sample, Genotype, Treatment, Group) %>% 
+  ggplot(aes(x = Group, y = HALLMARK_KRAS_SIGNALING_DN, fill = Group)) +
+    stat_boxplot(geom ='errorbar', width = 0.2) +
+  geom_boxplot() +
+  theme_few(base_size = 10) +
+  scale_fill_jco() +
+  xlab("") +
+  ylab("ssGSEA DNA repair hallmark (zscore)")
+```
+
+
+
+
+----
+
+## Differential abundance testing
+
+```{r}
+# Deseq2 to get significant results
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = metadata,
+                              design = ~ Group)
+
+dds.vst = vst(dds)
+```
+
+### Data exploration
+```{r}
+DESeq2::plotPCA(dds.vst, "Group")
+```
+
+
+### WT vs. G12 (untreated)
+```{r}
+# KRAS vas WT (Untreated)
+dds.g12_vs_wt = dds[,dds$Group %in% c("WT-Untreated", "G12-Untreated")]
+dds.g12_vs_wt$Group = droplevels(dds.g12_vs_wt$Group)
+dds.g12_vs_wt <- DESeq(dds.g12_vs_wt)
+
+# Get summary of results
+results(dds.g12_vs_wt, alpha = 0.05) %>% 
+  summary()
+
+# Get table of results
+dds.g12_vs_wt.df = results(dds.g12_vs_wt, alpha = 0.05, tidy = T) %>% 
+  filter(!is.na(padj)) %>% 
+  rename(symbol = row) %>% 
+  filter(abs(log2FoldChange) > 1) %>% 
+  filter(padj < 0.05)
+
+# Plot volcano plot
+dds.g12_vs_wt.df %>% 
+  mutate(q_val = -log10(padj)) %>% 
+  ggplot(aes(x = log2FoldChange, y = q_val)) +
+  geom_point() +
+  theme_few()
+
+# Plot individual genes
+
+```
+
+
+### WT vs. G12 (interaction)
+```{r}
+dds.g12_ftd = dds[,dds$Group %in% c("WT-Control", "G12-Control", "WT-FTD", "G12-FTD")]
+dds.g12_ftd$Group = droplevels(dds.g12_ftd$Group)
+dds.g12_ftd$Genotype = as.factor(dds.g12_ftd$Genotype)
+dds.g12_ftd$Treatment = as.factor(dds.g12_ftd$Treatment)
+design(dds.g12_ftd) = ~Genotype*Treatment + Genotype:Treatment
+
+# Get summary of results
+results(dds.g12_ftd, alpha = 0.05) %>% 
+  summary()
+
+# Get table of results
+dds.g12_ftd.df = results(dds.g12_ftd, alpha = 0.05, tidy = T) %>% 
+  filter(!is.na(padj)) %>% 
+  rename(symbol = row)
+
+```
+
+
+
+
+
